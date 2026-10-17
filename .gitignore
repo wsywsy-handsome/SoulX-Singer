@@ -40,3 +40,8 @@ deploy/
 # midi editor
 node_modules/
 dist/
+
+# User define
+experiment/
+
+record_data*
