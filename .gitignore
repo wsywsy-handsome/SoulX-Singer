@@ -45,3 +45,4 @@ dist/
 experiment/
 
 record_data*
+ckpt/

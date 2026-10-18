@@ -1,0 +1,58 @@
+# 模型/音频参数与基础推理配置一致；仅这里新增训练选项。
+train: # 训练循环、优化器和日志设置
+  checkpoint: null # 初始完整模型权重（含声码器）；命令行 --checkpoint 优先；不恢复优化器或步数
+  output_dir: outputs/training # 保存 logs/terminal.log（完整输出）、logs/report.log（精简报告）、metrics.jsonl、checkpoints/ 和 audio/；日志追加写入
+  total_iters: 500000 # 总训练步数（batch 次数），不是 epoch 数；无梯度累积
+  warmup_iters: 30000 # 学习率从 0 线性升至 lr 的步数，之后余弦衰减；须小于 total_iters
+  val_iters: 10000 # 每隔这些步先保存权重，再生成一条验证试听；最后一步也保存
+  log_interval: 100 # 每隔这些步打印并写入训练 loss 和学习率；第 1 步也记录
+  batch_size: 1 # 每个进程/GPU 的样本数；全局 batch 为此值乘 GPU 数
+  num_workers: 4 # 每个训练 DataLoader 的数据加载子进程数；0 表示主进程加载
+  lr: 0.0002 # AdamW 的基准/峰值学习率，实际值由 warmup 和余弦调度决定
+  seed: 24 # 歌曲划分与采样随机种子；各训练进程使用 seed + rank 初始化随机流
+  clip_max_norm: 1.0 # 梯度全局 L2 范数的裁剪上限，在梯度 unscale 后应用
+  fp16: true # 启用 CUDA FP16 autocast 和梯度缩放；CPU 训练须设为 false，Mel 提取仍用 FP32
+
+data: # 离线 PT 数据索引与训练/验证划分
+  final_list_path: data/final_list.txt # 索引文件，每行格式为 歌曲名:片段ID,片段ID,...
+  pt_dir: /inspire/hdd2/project/multilingualspeechrecognition/chenxie-25019/tieruian/163music_datasets_pt # PT 根目录，文件路径为 <pt_dir>/<歌曲名>/<片段ID>.pt
+  test_song_count: 5 # 打乱歌曲后留出的验证歌曲数，须小于歌曲总数；0 关闭试听验证
+  max_sec: 16.0 # prompt、target 各自允许的最大音频秒数；超长报错，不自动裁剪或重采样
+
+infer: # 训练期间生成验证试听音频的推理参数
+  n_steps: 32 # 从噪声生成 Mel 的数值积分步数，越大通常推理越慢
+  cfg: 3 # 无分类器引导强度；使用 v_cond + cfg * (v_cond - v_uncond) 并重缩放，0 关闭引导
+
+audio: # Mel 提取与归一化参数，应与离线数据和预训练模型一致
+  hop_size: 480 # 相邻声学帧间隔的采样点数；24 kHz 下为 20 ms，即 50 帧/秒
+  sample_rate: 24000 # 音频采样率（Hz），也用于试听文件写出；Dataset 不自动重采样
+  max_length: 36000 # 兼容原配置的保留字段，当前训练链路未读取；时长限制由 data.max_sec 控制
+  n_fft: 1920 # STFT 的 FFT 点数，决定频率采样网格
+  num_mels: 128 # Mel 滤波器/频谱通道数，须与 flow_matching.mel_dim 和声码器匹配
+  win_size: 1920 # STFT 窗长（采样点数），24 kHz 下为 80 ms
+  fmin: 0 # Mel 滤波器组的最低频率（Hz）
+  fmax: 12000 # Mel 滤波器组的最高频率（Hz），不应超过采样率的一半
+  mel_var: 8.14 # Mel 归一化方差；归一化公式为 (mel - mel_mean) / sqrt(mel_var)
+  mel_mean: -4.92 # Mel 归一化均值，须与预训练模型使用的统计量一致
+
+model: # 模型结构参数；严格加载 checkpoint 时须与其结构匹配
+  encoder: # 音素、音符和帧级 F0 的条件编码器
+    vocab_size: 3000 # phoneme embedding 词表大小，数据中的音素 ID 须小于该值
+    text_dim: 512 # 音素 embedding 维度，也是 preflow 的通道数
+    pitch_dim: 512 # 音符音高 embedding 维度；与 text_dim 相等才能逐元素相加
+    type_dim: 512 # 音符类型 embedding 维度；须与 text_dim 相等
+    f0_bin: 361 # F0 embedding 桶数，含无声桶 0；当前 F0 量化函数默认也使用 361 桶
+    f0_dim: 512 # 帧级 F0 embedding 维度；须与展开后的 text_dim 相等
+    num_layers: 4 # 条件编码器 preflow 中 ConvNeXtV2Block 的层数
+
+  flow_matching: # 条件流匹配生成网络及训练噪声路径设置
+    mel_dim: 128 # 输入/输出 Mel 通道数，须等于 audio.num_mels
+    hidden_size: 1024 # flow Transformer 的隐藏维度，须能被 num_heads 整除
+    num_layers: 22 # flow Transformer 的层数
+    num_heads: 16 # 每层多头注意力的头数
+    cfg_drop_prob: 0.2 # 训练时整批丢弃参考 Mel 条件和编码条件的概率，用于学习无条件分支
+    use_embedding: False # false 用线性层投影连续条件；true 用离散 ID 查表，当前编码器输出要求 false
+    cond_codebook_size: 512 # false 时为条件输入维度（须等于 encoder.text_dim）；true 时为条件词表大小
+    cond_scale_factor: 1 # 条件时间轴上采样倍率；1 不上采样，增大时应为 2 的幂；当前条件已对齐帧级
+    sigma: 1e-5 # 流路径 t=1 时的残余噪声系数；监督速度为 x - (1 - sigma) * noise
+    time_scheduler: cos # 训练时间 t 的采样变换：cos 为 1-cos(u*pi/2)，linear 保留均匀采样；非学习率调度
