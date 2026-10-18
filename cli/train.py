@@ -44,6 +44,13 @@ def run_training(args, cfg):
     report = logging.getLogger('soulxsinger.train')
     config = OmegaConf.to_container(cfg, resolve=True)
     options = config['train']
+    train_control = options.get('control', 'random')
+    infer_control = config['infer'].get('control', 'melody')
+    if train_control not in ('random', 'melody', 'score', 'neither'):
+        raise ValueError(f'Invalid train.control: {train_control}')
+    if infer_control not in ('melody', 'score', 'neither'):
+        raise ValueError(f'Invalid infer.control: {infer_control}')
+    report.info('Control modes: train=%s inference=%s', train_control, infer_control)
     for key in ('total_iters', 'val_iters', 'log_interval', 'batch_size'):
         if options[key] <= 0:
             raise ValueError(f'{key} must be positive')

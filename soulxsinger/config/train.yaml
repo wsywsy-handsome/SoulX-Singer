@@ -1,14 +1,15 @@
 # 模型/音频参数与基础推理配置一致；仅这里新增训练选项。
 train: # 训练循环、优化器和日志设置
+  control: neither # random 为 score/melody 二选一；neither 将两种音高输入均置零
   checkpoint: null # 初始完整模型权重（含声码器）；命令行 --checkpoint 优先；不恢复优化器或步数
-  output_dir: outputs/training # 保存 logs/terminal.log（完整输出）、logs/report.log（精简报告）、metrics.jsonl、checkpoints/ 和 audio/；日志追加写入
+  output_dir: outputs/training_neither # 保存 logs/terminal.log（完整输出）、logs/report.log（精简报告）、metrics.jsonl、checkpoints/ 和 audio/；日志追加写入
   total_iters: 500000 # 总训练步数（batch 次数），不是 epoch 数；无梯度累积
   warmup_iters: 30000 # 学习率从 0 线性升至 lr 的步数，之后余弦衰减；须小于 total_iters
   val_iters: 10000 # 每隔这些步先保存权重，再生成一条验证试听；最后一步也保存
   log_interval: 100 # 每隔这些步打印并写入训练 loss 和学习率；第 1 步也记录
-  batch_size: 1 # 每个进程/GPU 的样本数；全局 batch 为此值乘 GPU 数
+  batch_size: 8 # 每个进程/GPU 的样本数；全局 batch 为此值乘 GPU 数
   num_workers: 4 # 每个训练 DataLoader 的数据加载子进程数；0 表示主进程加载
-  lr: 0.0002 # AdamW 的基准/峰值学习率，实际值由 warmup 和余弦调度决定
+  lr: 0.00001 # AdamW 的基准/峰值学习率，实际值由 warmup 和余弦调度决定
   seed: 24 # 歌曲划分与采样随机种子；各训练进程使用 seed + rank 初始化随机流
   clip_max_norm: 1.0 # 梯度全局 L2 范数的裁剪上限，在梯度 unscale 后应用
   fp16: true # 启用 CUDA FP16 autocast 和梯度缩放；CPU 训练须设为 false，Mel 提取仍用 FP32
@@ -19,7 +20,9 @@ data: # 离线 PT 数据索引与训练/验证划分
   test_song_count: 5 # 打乱歌曲后留出的验证歌曲数，须小于歌曲总数；0 关闭试听验证
   max_sec: 16.0 # prompt、target 各自允许的最大音频秒数；超长报错，不自动裁剪或重采样
 
-infer: # 训练期间生成验证试听音频的推理参数
+infer: # 训练前 step_0 和训练期间的验证试听参数
+  seed: 24 # 每次试听使用相同噪声，便于比较；不改变训练随机状态
+  control: neither # 试听模式：melody / score / neither
   n_steps: 32 # 从噪声生成 Mel 的数值积分步数，越大通常推理越慢
   cfg: 3 # 无分类器引导强度；使用 v_cond + cfg * (v_cond - v_uncond) 并重缩放，0 关闭引导
 

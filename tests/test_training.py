@@ -1,3 +1,5 @@
+import random
+import numpy as np
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +12,7 @@ from torch.distributed.fsdp.sharded_grad_scaler import ShardedGradScaler
 from torch.utils.data import DataLoader
 
 from soulxsinger.training.dataset import SoulXSingerDataset, soulx_collate_fn
-from soulxsinger.training.trainer import cfm_loss, lr_multiplier, train
+from soulxsinger.training.trainer import cfm_loss, lr_multiplier, train, validate_for_comparison
 
 
 def segment(frames):
@@ -25,9 +27,15 @@ class TinyModel(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.tensor(0.0))
         self.mel, self.vocoder = nn.Identity(), nn.Identity()
+        self.controls = []
+        self.validation_weights = []
+        self.validation_noise = []
 
     def forward(self, batch, run_infer=False, **kwargs):
+        self.controls.append((run_infer, kwargs.get('control')))
         if run_infer:
+            self.validation_weights.append(self.weight.item())
+            self.validation_noise.append(torch.rand(3))
             return torch.zeros(1, 960)
         target = batch['target']['f0'][..., None] / 220
         mask = torch.arange(target.shape[1])[None, :] < batch['target_mel_len'][:, None]
@@ -36,6 +44,15 @@ class TinyModel(nn.Module):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_invalid_control_config(self):
+        from cli.train import run_training
+        from omegaconf import OmegaConf
+        for section in ('train', 'infer'):
+            cfg = {'train': {}, 'infer': {}}
+            cfg[section]['control'] = 'invalid'
+            with self.assertRaisesRegex(ValueError, f'Invalid {section}.control'):
+                run_training(None, OmegaConf.create(cfg))
+
     def test_loss_masks_and_sigma(self):
         pred = torch.tensor([[[2., 2.], [999., 999.]]], requires_grad=True)
         out = dict(flow_pred=pred, x=torch.full_like(pred, 3.),
@@ -69,7 +86,31 @@ class TrainingTests(unittest.TestCase):
                                         validation[0]['prompt']['waveform']))
             soulx_collate_fn([training[0], training[1]])
 
+    def test_validation_preserves_rng(self):
+        with tempfile.TemporaryDirectory() as folder:
+            model = TinyModel()
+            loader = DataLoader([dict(prompt=segment(3), target=segment(4))],
+                                collate_fn=soulx_collate_fn)
+            cfg = dict(train=dict(output_dir=folder), infer=dict(n_steps=1, cfg=0),
+                       audio=dict(sample_rate=24000))
+            py_state = random.getstate()
+            np_state = np.random.get_state()
+            torch_state = torch.get_rng_state().clone()
+            validate_for_comparison(model, loader, torch.device('cpu'), cfg, 0)
+            self.assertEqual(random.getstate(), py_state)
+            current = np.random.get_state()
+            self.assertEqual(current[0], np_state[0])
+            np.testing.assert_array_equal(current[1], np_state[1])
+            self.assertEqual(current[2:], np_state[2:])
+            self.assertTrue(torch.equal(torch.get_rng_state(), torch_state))
+
     def test_train_save_and_validate(self):
+        self._train_save_and_validate(False)
+
+    def test_neither_train_and_validation_control(self):
+        self._train_save_and_validate(True)
+
+    def _train_save_and_validate(self, neither):
         with tempfile.TemporaryDirectory() as folder:
             model = TinyModel()
             loader = DataLoader([dict(prompt=segment(3), target=segment(4))],
@@ -81,7 +122,19 @@ class TrainingTests(unittest.TestCase):
                                   val_iters=1, fp16=False, clip_max_norm=1.),
                        model=dict(flow_matching=dict(sigma=1e-5)),
                        audio=dict(sample_rate=24000), infer=dict(n_steps=1, cfg=0))
+            if neither:
+                cfg['train']['control'] = cfg['infer']['control'] = 'neither'
             train(model, loader, optim, scheduler, scaler, torch.device('cpu'), cfg, loader)
+            expected = [(False, 'neither' if neither else 'random'),
+                        (True, 'neither' if neither else 'melody')] * 2
+            expected.insert(0, (True, 'neither' if neither else 'melody'))
+            self.assertEqual(model.controls, expected)
+            self.assertEqual(model.validation_weights[0], 0.)
+            self.assertGreater(model.validation_weights[-1], 0.)
+            for noise in model.validation_noise[1:]:
+                torch.testing.assert_close(noise, model.validation_noise[0])
+            self.assertTrue((Path(folder)/'audio/step_0.wav').exists())
+            self.assertFalse((Path(folder)/'checkpoints/step_0.pt').exists())
             self.assertGreater(model.weight.item(), 0)
             state = torch.load(Path(folder)/'checkpoints/step_2.pt', weights_only=False)
             clone = TinyModel()

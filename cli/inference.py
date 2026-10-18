@@ -63,8 +63,8 @@ def build_model(
 def process(args, config, model: torch.nn.Module):
     """Run the full inference pipeline given a data_processor and model.
     """
-    if args.control not in ("melody", "score"):
-        raise ValueError(f"control must be 'melody' or 'score', got: {args.control}")
+    if args.control not in ("melody", "score", "neither"):
+        raise ValueError(f"control must be 'melody', 'score' or 'neither', got: {args.control}")
 
     print(f"prompt_metadata_path: {args.prompt_metadata_path}")
     print(f"target_metadata_path: {args.target_metadata_path}")
@@ -147,8 +147,8 @@ if __name__ == "__main__":
         "--control",
         type=str,
         default="melody",
-        choices=["melody", "score"],
-        help="Control mode: melody or score only",
+        choices=["melody", "score", "neither"],
+        help="Control mode: melody, score, or neither (no explicit pitch conditions)",
     )
     parser.add_argument(
         "--fp16",

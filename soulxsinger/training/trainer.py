@@ -5,6 +5,7 @@ import math
 import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -87,7 +88,7 @@ def validate(model, loader, device, config, step, rank=0):
     model.eval()
     try:
         batch = move_to_device(next(iter(loader)), device)
-        audio = model(batch, run_infer=True, control='melody', use_fp16=False,
+        audio = model(batch, run_infer=True, control=config['infer'].get('control', 'melody'), use_fp16=False,
                       n_steps=config['infer']['n_steps'], cfg=config['infer']['cfg'])
         if rank == 0:
             path = Path(config['train']['output_dir']) / 'audio'
@@ -100,6 +101,30 @@ def validate(model, loader, device, config, step, rank=0):
         model.vocoder.eval()
 
 
+def validate_for_comparison(model, loader, device, config, step, rank=0):
+    """Reuse validation noise without advancing the training RNG streams."""
+    seed = config['infer'].get('seed', config['train'].get('seed', 24))
+    python_rng, numpy_rng = random.getstate(), np.random.get_state()
+    devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == 'cuda' else []
+    try:
+        with torch.random.fork_rng(devices=devices):
+            random.seed(seed)
+            np.random.seed(seed % 2**32)
+            torch.random.default_generator.manual_seed(seed)
+            if devices:
+                with torch.cuda.device(devices[0]):
+                    torch.cuda.manual_seed(seed)
+            if rank == 0:
+                report.info('Validation started: step=%s seed=%s', step, seed)
+            validate(model, loader, device, config, step, rank)
+            if rank == 0:
+                report.info('Validation audio saved: %s',
+                            Path(config['train']['output_dir']) / 'audio' / f'step_{step}.wav')
+    finally:
+        random.setstate(python_rng)
+        np.random.set_state(numpy_rng)
+
+
 def train(model, loader, optimizer, scheduler, scaler, device, config,
           val_loader=None, rank=0):
     options = config['train']
@@ -110,11 +135,13 @@ def train(model, loader, optimizer, scheduler, scaler, device, config,
     output_dir = Path(options['output_dir'])
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
+    if val_loader is not None:
+        validate_for_comparison(model, val_loader, device, config, 0, rank)
     for step in range(1, options['total_iters'] + 1):
         batch, epoch = next(batches)
         batch = move_to_device(batch, device)
         optimizer.zero_grad(set_to_none=True)
-        outputs = model(batch, control='random', use_fp16=options['fp16'])
+        outputs = model(batch, control=options.get('control', 'random'), use_fp16=options['fp16'])
         loss = cfm_loss(outputs, float(config['model']['flow_matching']['sigma']))
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -147,13 +174,4 @@ def train(model, loader, optimizer, scheduler, scaler, device, config,
             if rank == 0:
                 report.info('Checkpoint saved: %s', output_dir / 'checkpoints' / f'step_{step}.pt')
             if val_loader is not None:
-                # 试听不改变训练端 Python/Torch 随机流。
-                rng = random.getstate()
-                devices = [device.index] if device.type == 'cuda' else []
-                try:
-                    with torch.random.fork_rng(devices=devices):
-                        validate(model, val_loader, device, config, step, rank)
-                        if rank == 0:
-                            report.info('Validation audio saved: %s', output_dir / 'audio' / f'step_{step}.wav')
-                finally:
-                    random.setstate(rng)
+                validate_for_comparison(model, val_loader, device, config, step, rank)

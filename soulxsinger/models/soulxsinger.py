@@ -125,7 +125,9 @@ class SoulXSinger(nn.Module):
         pt_mel2note = meta['prompt']['mel2note']
         pt_note_type = meta['prompt']['note_type']
 
-        if control == "score":
+        if control == "neither":
+            gt_note_pitch = pt_note_pitch = gt_f0 = pt_f0 = None
+        elif control == "score":
             gt_note_pitch = meta['target']['note_pitch']
             pt_note_pitch = meta['prompt']['note_pitch']
             gt_f0 = None
@@ -137,6 +139,9 @@ class SoulXSinger(nn.Module):
             pt_note_pitch = None
         else:
             raise ValueError(f"Unknown control mode: {control}")
+
+        if control == "neither" and (auto_shift or pitch_shift != 0):
+            raise ValueError("neither control does not support auto_shift or pitch_shift")
 
         # calculate auto pitch shift
         if auto_shift and pitch_shift == 0:
@@ -228,7 +233,9 @@ class SoulXSinger(nn.Module):
         pt_mel2note = meta['prompt']['mel2note']
         pt_note_type = meta['prompt']['note_type']
 
-        if control == "score":
+        if control == "neither":
+            gt_note_pitch = pt_note_pitch = gt_f0 = pt_f0 = None
+        elif control == "score":
             gt_note_pitch = meta['target']['note_pitch']
             pt_note_pitch = meta['prompt']['note_pitch']
             gt_f0 = None

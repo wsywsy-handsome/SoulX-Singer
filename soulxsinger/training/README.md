@@ -2,7 +2,7 @@
 
 从 `recon/main.py`、`core/trainer.py`、`core/test.py` 和基础 PT 数据加载逻辑提取，接入本项目的 `SoulXSinger.forward()`。不包含 Opera/LoRA、先验 Mel、技巧重绘等实验分支。
 
-保留：随机 score/melody 控制、masked flow L1 loss、AdamW（betas 0.9/0.95、eps 1e-6、weight decay 0.1）、梯度缩放/裁剪、线性 warmup + cosine、按 step 保存后再生成试听音频、torchrun FSDP 多卡。默认训练参数来自源项目。当前支持 FP32 或 FP16 autocast；不迁入源入口的 BF16 FSDP mixed-precision 策略，避免 Mel 缓冲区被整体转为低精度。
+保留：可配置的 score/melody/neither 控制（random 为 score/melody 二选一）、masked flow L1 loss、AdamW（betas 0.9/0.95、eps 1e-6、weight decay 0.1）、梯度缩放/裁剪、线性 warmup + cosine、按 step 保存后再生成试听音频、torchrun FSDP 多卡。默认训练参数来自源项目。当前支持 FP32 或 FP16 autocast；不迁入源入口的 BF16 FSDP mixed-precision 策略，避免 Mel 缓冲区被整体转为低精度。
 
 ## 数据
 
@@ -68,3 +68,25 @@ python -m cli.train --help
 ```
 
 测试覆盖 loss 的 sigma/mask、变长 collate、歌曲划分和固定验证配对，以及轻量模型两步训练、保存/加载、试听和训练状态恢复。完整模型多卡训练需在可用 GPU 与真实离线数据上验证。
+
+## neither 接力训练实验
+
+当前配置使用 `train.control: neither`、`infer.control: neither`，输出写入
+`outputs/training_neither`。缺省这两个配置时，分别回退 `random` 和 `melody`。
+训练支持 random/melody/score/neither，试听支持 melody/score/neither。
+
+neither 在训练和推理中都忽略 prompt/target 的 F0 和 note_pitch，按 mel2note
+和 note_type 的形状生成零输入；保留音高 embedding 的索引 0，embedding 输出
+不一定为零。参考音频、音素、note_type 和 mel2note 仍参与条件编码，因此是
+无显式音高条件生成，不是纯歌词生成。Dataset 仍要求原来的全部 PT 字段。
+
+使用 `--checkpoint` 加载基模进行全参数接力训练（Mel 提取器和声码器继续冻结），
+优化器和学习率重新初始化，不恢复之前的训练步数。模型参数键和形状不变。
+独立推理使用 `python -m cli.inference ... --control neither`，默认仍为 melody；
+neither 不支持 `--auto_shift` 或非零 `--pitch_shift`。SVC 模型不受影响。
+
+训练开始前会先生成 `audio/step_0.wav`（不额外保存 step_0 checkpoint），
+随后按原周期保存模型并生成试听。所有试听固定使用 `infer.seed`，未设置时
+回退到 `train.seed`（再缺省为 24），与固定验证配对一起用于训练前后对比。
+试听保留并恢复 Python、NumPy、CPU Torch 和当前 CUDA 设备的随机状态。
+`test_song_count: 0` 时不执行训练前或训练期间的试听。
